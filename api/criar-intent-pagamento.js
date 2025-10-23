@@ -1,57 +1,70 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
+// Função auxiliar para validar o tipo de plano
+const getPlanDetails = (planType) => {
+  switch (planType) {
+    case 'monthly':
+      return { amount: 1999, description: 'Eva Premium Mensal' }; // R$ 19,99
+    case 'annual':
+      return { amount: 11999, description: 'Eva Premium Anual' }; // R$ 119,99
+    default:
+      throw new Error('Tipo de plano inválido.'); // Lança erro se o plano não for reconhecido
+  }
+};
+
 module.exports = async (request, response) => {
   if (request.method !== 'POST') {
     return response.status(405).send('Método não permitido');
   }
 
   try {
-    // Valor (ainda R$ 0,50 para teste)
-    const amount = 50;
+    // 1. Extrai o tipo de plano do corpo da requisição
+    const { planType } = request.body;
+    if (!planType) {
+       return response.status(400).json({ error: 'Tipo de plano (planType) é obrigatório.' });
+    }
 
-    // Cria a Intenção de Pagamento incluindo 'boleto'
+    // 2. Obtém os detalhes do plano (valor e descrição)
+    const { amount, description } = getPlanDetails(planType);
+
+    // Cria a Intenção de Pagamento com o valor correto
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount,
       currency: 'brl',
-      payment_method_types: ['card', 'boleto'], // Garante que boleto está incluído
-      // Dados do cliente para o Boleto (pode vir do app no futuro)
-      // O Stripe exige pelo menos o email e nome para boletos via API
-      // Adicionamos CPF/CNPJ e endereço para maior compatibilidade
-       receipt_email: 'cliente.boleto@email.com', // Email para recibo (opcional)
-       shipping: { // Stripe pode usar shipping como billing para boleto
-           name: 'Cliente Eva Boleto',
-           address: {
-             line1: 'Av. Paulista, 1000',
-             // line2: null, // Stripe não exige line2 para boleto via API
-             city: 'Sao Paulo',
-             state: 'SP',
-             postal_code: '01310-100',
-             country: 'BR',
-           },
-       },
-       // Metadata opcional
-       metadata: {
-           order_id: `eva_premium_${Date.now()}`
-       }
+      payment_method_types: ['card', 'boleto'],
+      receipt_email: 'cliente.pagamento@email.com', // Usar email real do cliente no futuro
+      shipping: { // Dados de exemplo, usar dados reais no futuro
+        name: 'Cliente Eva Premium',
+        address: {
+          line1: 'Endereço Exemplo, 123',
+          city: 'Cidade Exemplo',
+          state: 'SP',
+          postal_code: '01000-000',
+          country: 'BR',
+        },
+      },
+      // 3. Adiciona metadata para identificar o plano e talvez o usuário
+      metadata: {
+        order_id: `eva_premium_${planType}_${Date.now()}`,
+        plan: planType,
+        // user_id: 'ID_DO_USUARIO_LOGADO' // Adicionar no futuro
+      },
+      description: description // Descrição que pode aparecer na fatura
     });
 
-    // Variável para guardar a URL do boleto
     let boletoUrl = null;
-
-    // IMPORTANTE: Após criar o PaymentIntent, precisamos buscar
-    // a URL do boleto. Isso geralmente está na propriedade 'next_action'.
     if (paymentIntent.next_action && paymentIntent.next_action.boleto_display_details) {
       boletoUrl = paymentIntent.next_action.boleto_display_details.hosted_voucher_url;
     }
 
-    // Retorna o clientSecret (para cartão) E a URL do boleto (se gerada)
     response.status(200).json({
       clientSecret: paymentIntent.client_secret,
-      boletoUrl: boletoUrl, // Envia a URL para o app
+      boletoUrl: boletoUrl,
     });
 
   } catch (error) {
-    console.error("ERRO STRIPE (Intent/Boleto):", error.message);
-    response.status(500).json({ error: `Stripe Error: ${error.message}` });
+    console.error("ERRO STRIPE (Intent/Planos):", error.message);
+    // Retorna a mensagem de erro específica (ex: 'Tipo de plano inválido.')
+    response.status(400).json({ error: `Stripe Error: ${error.message}` });
   }
 };
