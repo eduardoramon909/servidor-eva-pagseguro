@@ -18,8 +18,9 @@ module.exports = async (request, response) => {
   }
 
   try {
-    // 1. Extrai o tipo de plano do corpo da requisição
-    const { planType } = request.body;
+    // 1. Extrai o tipo de plano e email do corpo da requisição
+    const { planType, email, userId } = request.body;
+    
     if (!planType) {
        return response.status(400).json({ error: 'Tipo de plano (planType) é obrigatório.' });
     }
@@ -27,13 +28,54 @@ module.exports = async (request, response) => {
     // 2. Obtém os detalhes do plano (valor e descrição)
     const { amount, description } = getPlanDetails(planType);
 
-    // Cria a Intenção de Pagamento com o valor correto
+    // 3. IMPORTANTE: Criar ou buscar o Customer do Stripe
+    let customer;
+    const customerEmail = email || 'cliente.pagamento@email.com';
+    
+    // Busca se já existe um customer com esse email
+    const existingCustomers = await stripe.customers.list({
+      email: customerEmail,
+      limit: 1
+    });
+
+    if (existingCustomers.data.length > 0) {
+      customer = existingCustomers.data[0];
+    } else {
+      // Cria novo customer
+      customer = await stripe.customers.create({
+        email: customerEmail,
+        metadata: {
+          user_id: userId || 'no_user_id',
+          app: 'eva_premium'
+        }
+      });
+    }
+
+    // 4. Criar Ephemeral Key para o customer (necessário para Payment Sheet)
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: customer.id },
+      { apiVersion: '2024-11-20.acacia' } // Use a versão mais recente da API do Stripe
+    );
+
+    // 5. Cria a Intenção de Pagamento com o valor correto
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount,
       currency: 'brl',
+      customer: customer.id, // Associa ao customer
       payment_method_types: ['card', 'boleto'],
-      receipt_email: 'cliente.pagamento@email.com', // Usar email real do cliente no futuro
-      shipping: { // Dados de exemplo, usar dados reais no futuro
+      receipt_email: customerEmail,
+      
+      // Configurações específicas para cada método de pagamento
+      payment_method_options: {
+        boleto: {
+          expires_after_days: 3 // Boleto expira em 3 dias
+        },
+        card: {
+          request_three_d_secure: 'automatic' // 3D Secure quando necessário
+        }
+      },
+      
+      shipping: { 
         name: 'Cliente Eva Premium',
         address: {
           line1: 'Endereço Exemplo, 123',
@@ -43,28 +85,43 @@ module.exports = async (request, response) => {
           country: 'BR',
         },
       },
-      // 3. Adiciona metadata para identificar o plano e talvez o usuário
+      
+      // Metadata para rastreamento
       metadata: {
         order_id: `eva_premium_${planType}_${Date.now()}`,
         plan: planType,
-        // user_id: 'ID_DO_USUARIO_LOGADO' // Adicionar no futuro
+        user_id: userId || 'no_user_id'
       },
-      description: description // Descrição que pode aparecer na fatura
+      
+      description: description,
+      
+      // IMPORTANTE: Permite métodos de pagamento com delay (como boleto)
+      capture_method: 'automatic_async'
     });
 
-    let boletoUrl = null;
+    // 6. Prepara resposta com todas as informações necessárias
+    const responseData = {
+      paymentIntent: paymentIntent.client_secret,
+      ephemeralKey: ephemeralKey.secret,
+      customer: customer.id
+    };
+
+    // 7. Se já houver informações de boleto, inclui na resposta
     if (paymentIntent.next_action && paymentIntent.next_action.boleto_display_details) {
-      boletoUrl = paymentIntent.next_action.boleto_display_details.hosted_voucher_url;
+      responseData.boletoUrl = paymentIntent.next_action.boleto_display_details.hosted_voucher_url;
     }
 
-    response.status(200).json({
-      clientSecret: paymentIntent.client_secret,
-      boletoUrl: boletoUrl,
-    });
+    console.log('✅ Payment Intent criado com sucesso:', paymentIntent.id);
+    response.status(200).json(responseData);
 
   } catch (error) {
-    console.error("ERRO STRIPE (Intent/Planos):", error.message);
-    // Retorna a mensagem de erro específica (ex: 'Tipo de plano inválido.')
-    response.status(400).json({ error: `Stripe Error: ${error.message}` });
+    console.error("❌ ERRO STRIPE (Intent/Planos):", error.message);
+    console.error("Stack:", error.stack);
+    
+    // Retorna a mensagem de erro específica
+    response.status(400).json({ 
+      error: `Stripe Error: ${error.message}`,
+      type: error.type || 'api_error'
+    });
   }
 };
